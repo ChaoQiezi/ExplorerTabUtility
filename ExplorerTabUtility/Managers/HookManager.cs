@@ -4,7 +4,6 @@ using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
-using System.Windows;
 using ExplorerTabUtility.Helpers;
 using ExplorerTabUtility.Models;
 using ExplorerTabUtility.Hooks;
@@ -42,11 +41,11 @@ public sealed class HookManager : IDisposable
         _mouseHook.OnHotKeyProfileTriggered += OnHotKeyProfileTriggered;
         _windowHook.OnShellInitialized += HandleShellInitialized;
 
-        if (Application.Current != null)
-            Application.Current.SessionEnding += OnSessionEnding;
+        if (System.Windows.Application.Current != null)
+            System.Windows.Application.Current.SessionEnding += OnSessionEnding;
     }
 
-    private void OnSessionEnding(object? sender, SessionEndingCancelEventArgs e) => Dispose();
+    private void OnSessionEnding(object? sender, System.Windows.SessionEndingCancelEventArgs e) => Dispose();
     private void HandleShellInitialized() => OnShellInitialized?.Invoke();
 
     private void OnProfilesUpdated(IReadOnlyList<HotKeyProfile> profiles)
@@ -233,8 +232,8 @@ public sealed class HookManager : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
 
-        if (Application.Current != null)
-            Application.Current.SessionEnding -= OnSessionEnding;
+        if (System.Windows.Application.Current != null)
+            System.Windows.Application.Current.SessionEnding -= OnSessionEnding;
 
         _profileManager.KeybindingsHookStarted -= KeybindingStarted;
         _profileManager.KeybindingsHookStopped -= KeybindingStopped;
