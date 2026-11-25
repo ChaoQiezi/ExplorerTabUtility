@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Linq;
 using System.Threading;
 using System.Diagnostics;
 using System.Collections.Concurrent;
@@ -21,155 +20,92 @@ public enum SessionFilter
 }
 
 /// <summary>
-/// Watches for process creation and termination events
+/// Event-driven watcher for process termination events using kernel wait notifications (zero polling CPU).
 /// </summary>
-public class ProcessWatcher : IDisposable
+public sealed class ProcessWatcher : IDisposable
 {
     private readonly string _processName;
-    private readonly TimeSpan _scanInterval;
     private readonly SessionFilter _sessionFilter;
     private readonly int _currentSessionId;
     private readonly ConcurrentDictionary<int, (Process Process, int SessionId)> _trackedProcesses = new();
-    private readonly Timer _scanTimer;
-    private readonly object _scanLock = new();
-    private readonly SynchronizationContext? _syncContext;
-    private bool _isMonitoring = true;
-    private bool _disposed;
+    private int _disposed;
 
-    public event EventHandler<ProcessEventArgs>? ProcessCreated;
     public event EventHandler<ProcessEventArgs>? ProcessTerminated;
 
-    /// <summary>
-    /// Creates a new ProcessWatcher to monitor processes with the specified name
-    /// </summary>
-    /// <param name="processName">Name of the process to monitor (without .exe extension)</param>
-    /// <param name="scanIntervalMs">How often to scan for processes in milliseconds</param>
-    /// <param name="sessionFilter">Whether to monitor all sessions or only the current session</param>
-    public ProcessWatcher(string processName, int scanIntervalMs = 500, SessionFilter sessionFilter = SessionFilter.Current)
+    public ProcessWatcher(string processName = "explorer", SessionFilter sessionFilter = SessionFilter.Current)
     {
         _processName = processName ?? throw new ArgumentNullException(nameof(processName));
-        _scanInterval = TimeSpan.FromMilliseconds(Math.Max(100, scanIntervalMs)); // Minimum 100ms
         _sessionFilter = sessionFilter;
         _currentSessionId = Process.GetCurrentProcess().SessionId;
-        _syncContext = SynchronizationContext.Current;
-
-        // Start scanning immediately, then at regular intervals
-        _scanTimer = new Timer(ScanForProcesses, null, TimeSpan.Zero, _scanInterval);
     }
 
     /// <summary>
-    /// Pauses the monitoring of processes
+    /// Begins tracking the specified process ID for termination using OS kernel exit notifications.
     /// </summary>
-    public void Pause()
+    public bool TrackProcess(int processId)
     {
-        if (_disposed) return;
-        _isMonitoring = false;
-        _scanTimer.Change(Timeout.Infinite, Timeout.Infinite);
-    }
+        if (processId <= 0 || Volatile.Read(ref _disposed) != 0)
+            return false;
 
-    /// <summary>
-    /// Resumes the monitoring of processes
-    /// </summary>
-    public void Resume()
-    {
-        if (_disposed) return;
-        _isMonitoring = true;
-        _scanTimer.Change(TimeSpan.Zero, _scanInterval);
-    }
+        if (_trackedProcesses.ContainsKey(processId))
+            return true;
 
-    private void ScanForProcesses(object? state)
-    {
-        if (_disposed || !_isMonitoring) return;
-
-        // Use lock to prevent concurrent scans
-        if (!Monitor.TryEnter(_scanLock)) return;
-
+        Process? process = null;
         try
         {
-            // Check for terminated processes
-            foreach (var pid in _trackedProcesses.Keys.ToList())
+            process = Process.GetProcessById(processId);
+            var sessionId = process.SessionId;
+
+            if (_sessionFilter == SessionFilter.Current && sessionId != _currentSessionId)
             {
-                if (!_trackedProcesses.TryGetValue(pid, out var info)) continue;
-        
-                bool hasExited;
-                try
-                {
-                    hasExited = info.Process.HasExited;
-                }
-                catch (Exception)
-                {
-                    hasExited = true;
-                }
-        
-                if (hasExited && _trackedProcesses.TryRemove(pid, out _))
-                {
-                    // The Process no longer exists, but we didn't get the exit event
-                    SafeCleanupAndNotifyTermination(pid, info);
-                }
+                SafeDisposeProcess(process);
+                return false;
             }
-            
-            // Check all matching processes
-            foreach (var process in Process.GetProcessesByName(_processName))
+
+            process.Exited += OnProcessExited;
+            process.EnableRaisingEvents = true;
+
+            if (!_trackedProcesses.TryAdd(processId, (process, sessionId)))
             {
-                try
-                {
-                    var processId = process.Id;
-
-                    // Skip if already tracking
-                    if (_trackedProcesses.ContainsKey(processId))
-                    {
-                        SafeDisposeProcess(process);
-                        continue;
-                    }
-
-                    // Skip if session doesn't match filter
-                    if (_sessionFilter == SessionFilter.Current && process.SessionId != _currentSessionId)
-                    {
-                        SafeDisposeProcess(process);
-                        continue;
-                    }
-
-                    // Found a new process to track
-                    var sessionId = process.SessionId;
-                    process.Exited += OnProcessExited;
-                    process.EnableRaisingEvents = true;
-
-                    if (!_trackedProcesses.TryAdd(processId, (process, sessionId))) continue;
-
-                    // Successfully added - raise ProcessCreated event
-                    var args = new ProcessEventArgs(processId, _processName, sessionId);
-                    RaiseEvent(ProcessCreated, args);
-                }
-                catch (Exception)
-                {
-                    // Individual process handling failed
-                    SafeDisposeProcess(process);
-                }
+                process.Exited -= OnProcessExited;
+                SafeDisposeProcess(process);
+                return true;
             }
+
+            // Close the race window if the process exited before Exited was subscribed
+            if (process.HasExited && _trackedProcesses.TryRemove(processId, out var info))
+            {
+                SafeCleanupAndNotifyTermination(processId, info);
+                return false;
+            }
+
+            return true;
         }
-        finally
+        catch
         {
-            Monitor.Exit(_scanLock);
+            if (process != null)
+            {
+                try { process.Exited -= OnProcessExited; } catch { /* ignored */ }
+                SafeDisposeProcess(process);
+            }
+            return false;
         }
     }
 
     private void OnProcessExited(object? sender, EventArgs e)
     {
-        if (_disposed || !_isMonitoring) return;
+        if (Volatile.Read(ref _disposed) != 0) return;
         if (sender is not Process process) return;
 
         try
         {
             var processId = process.Id;
-
-            // Remove from tracking dictionary
             if (_trackedProcesses.TryRemove(processId, out var info))
             {
-                // Cleanup and notify
                 SafeCleanupAndNotifyTermination(processId, info);
             }
         }
-        catch (Exception)
+        catch
         {
             // Process object might be in an inconsistent state after exit
         }
@@ -179,89 +115,56 @@ public class ProcessWatcher : IDisposable
     {
         try
         {
-            // Unhook event
             info.Process.Exited -= OnProcessExited;
-
-            // Create event args
-            var args = new ProcessEventArgs(processId, _processName, info.SessionId);
-
-            // Raise event
-            RaiseEvent(ProcessTerminated, args);
+            var handler = ProcessTerminated;
+            if (handler != null && Volatile.Read(ref _disposed) == 0)
+            {
+                var args = new ProcessEventArgs(processId, _processName, info.SessionId);
+                handler(this, args);
+            }
         }
-        catch (Exception)
+        catch
         {
             // Ignore cleanup errors
         }
         finally
         {
-            // Always try to dispose
             SafeDisposeProcess(info.Process);
         }
     }
 
-    private void RaiseEvent<T>(EventHandler<T>? eventHandler, T args) where T : EventArgs
-    {
-        if (eventHandler == null) return;
-
-        // Raise event in the original synchronization context if available
-        if (_syncContext != null)
-        {
-            _syncContext.Post(_ => eventHandler(this, args), null);
-        }
-        else
-        {
-            eventHandler(this, args);
-        }
-    }
-
-    private void SafeDisposeProcess(Process process)
+    private static void SafeDisposeProcess(Process process)
     {
         try
         {
             process.Dispose();
         }
-        catch (Exception)
+        catch
         {
             // Ignore disposal errors
         }
     }
 
-    /// <summary>
-    /// Releases all resources used by the ProcessWatcher
-    /// </summary>
     public void Dispose()
     {
-        if (_disposed) return;
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
 
-        _disposed = true;
-        _isMonitoring = false;
-
-        // Stop timer
-        try
-        {
-            _scanTimer.Change(Timeout.Infinite, Timeout.Infinite);
-            _scanTimer.Dispose();
-        }
-        catch
-        {
-            // ignored
-        }
-
-        // Clean up tracked processes
         foreach (var kvp in _trackedProcesses)
         {
+            if (!_trackedProcesses.TryRemove(kvp.Key, out var info))
+                continue;
+
             try
             {
-                kvp.Value.Process.Exited -= OnProcessExited;
+                info.Process.Exited -= OnProcessExited;
             }
             catch
             {
                 // ignored
             }
 
-            SafeDisposeProcess(kvp.Value.Process);
+            SafeDisposeProcess(info.Process);
         }
-
-        _trackedProcesses.Clear();
     }
 }

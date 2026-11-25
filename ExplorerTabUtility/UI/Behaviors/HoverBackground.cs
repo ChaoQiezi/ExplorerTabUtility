@@ -65,16 +65,24 @@ public static class HoverBackground
             if (element.IsLoaded)
                 StoreOriginalBackground(element);
             else
-                element.Loaded += (_, _) => StoreOriginalBackground(element);
+                element.Loaded += Element_Loaded;
         }
         else
         {
+            element.Loaded -= Element_Loaded;
             element.MouseEnter -= Element_MouseEnter;
             element.MouseLeave -= Element_MouseLeave;
 
             // Restore original background if needed
             RestoreOriginalBackground(element);
         }
+    }
+
+    private static void Element_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement element) return;
+        element.Loaded -= Element_Loaded;
+        StoreOriginalBackground(element);
     }
 
     private static void Element_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
@@ -84,7 +92,11 @@ public static class HoverBackground
         var hoverColor = GetHoverColor(element);
         var duration = GetAnimationDuration(element);
 
-        AnimateBackgroundChange(element, new SolidColorBrush(hoverColor), duration);
+        var brush = new SolidColorBrush(hoverColor);
+        if (duration == TimeSpan.Zero)
+            brush.Freeze();
+
+        AnimateBackgroundChange(element, brush, duration);
     }
 
     private static void Element_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
@@ -105,8 +117,8 @@ public static class HoverBackground
         // Get current background
         var currentBrush = GetBackgroundBrush(element);
 
-        // If no current background or target is null, just set directly
-        if (currentBrush == null || targetBrush == null)
+        // If no animation duration, no current background, or target is null, just set directly
+        if ((duration.HasTimeSpan && duration.TimeSpan == TimeSpan.Zero) || currentBrush == null || targetBrush == null)
         {
             ApplyBackground(element, targetBrush);
             return;

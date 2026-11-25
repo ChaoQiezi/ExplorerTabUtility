@@ -1,5 +1,7 @@
 ﻿using System;
+using System.Linq;
 using System.Threading;
+using System.Diagnostics;
 using System.Collections.Generic;
 using System.Drawing;
 using H.Hooks;
@@ -10,58 +12,76 @@ namespace ExplorerTabUtility.Hooks;
 
 public sealed class Mouse : IHook
 {
-    private int _lastClickTime;
+    private long _lastClickTicks;
     private Key _lastClickKey;
     private readonly LowLevelMouseHook _lowLevelMouseHook;
-    private readonly IReadOnlyCollection<HotKeyProfile> _hotkeyProfiles;
+    private volatile HotKeyProfile[] _profiles = [];
+    private int _disposed;
     public bool IsHookActive => _lowLevelMouseHook.IsStarted;
     public event Action<HotKeyEventArgs>? OnHotKeyProfileTriggered;
 
     public Mouse(IReadOnlyCollection<HotKeyProfile> hotkeyProfiles)
     {
-        _hotkeyProfiles = hotkeyProfiles;
+        UpdateProfiles(hotkeyProfiles);
         _lowLevelMouseHook = new LowLevelMouseHook { AddKeyboardKeys = true };
         _lowLevelMouseHook.Down += LowLevelMouseHook_Down;
     }
 
-    public void StartHook() => _lowLevelMouseHook.Start();
-    public void StopHook() => _lowLevelMouseHook.Stop();
+    public void UpdateProfiles(IEnumerable<HotKeyProfile> hotkeyProfiles)
+    {
+        // Pre-filter into a compact immutable array for lock-free, zero-allocation hook dispatch
+        _profiles = hotkeyProfiles
+            .Where(p => p.IsMouse && p.IsEnabled && p.HotKeys is { Length: > 0 })
+            .ToArray();
+    }
+
+    public void StartHook()
+    {
+        if (Volatile.Read(ref _disposed) == 0)
+            _lowLevelMouseHook.Start();
+    }
+
+    public void StopHook()
+    {
+        if (Volatile.Read(ref _disposed) == 0)
+            _lowLevelMouseHook.Stop();
+    }
 
     private void LowLevelMouseHook_Down(object? sender, MouseEventArgs e)
     {
         var handler = OnHotKeyProfileTriggered;
         if (handler == null) return;
 
+        var profiles = _profiles;
+        if (profiles.Length == 0) return;
+
         var isDoubleClick = IsDoubleClick(e.CurrentKey);
 
         bool? isFileExplorerForeground = null;
         nint handle = 0;
-        foreach (var profile in _hotkeyProfiles)
+        for (var i = 0; i < profiles.Length; i++)
         {
-            // Skip disabled, empty or non mouse
-            if (!profile.IsMouse || !profile.IsEnabled || profile.HotKeys is null || profile.HotKeys.Length == 0)
-                continue;
-            
+            var profile = profiles[i];
+
             // Skip if it requires double-click and it is not
             if (profile.IsDoubleClick && !isDoubleClick) continue;
-            
-            // Skip if keys do not match
-            if (!e.Keys.Are(profile.HotKeys)) continue;
 
-            // Let's see if we need to check File Explorer
+            // Skip if keys do not match
+            if (!e.Keys.Are(profile.HotKeys!)) continue;
+
+            // Check File Explorer scope only when needed (cached for this click event)
             if (profile.Scope == HotkeyScope.FileExplorer)
             {
-                // Check if File Explorer is foreground (only once)
                 isFileExplorerForeground ??= Helper.IsFileExplorerForeground(out handle);
 
                 if (isFileExplorerForeground == false)
                 {
-                    handle = 0; // Reset handle if not File Explorer
+                    handle = 0;
                     continue;
                 }
             }
-            
-            // Queue the hotkey trigger in a separate thread.
+
+            // Queue the hotkey trigger in a separate thread
 #if NET7_0_OR_GREATER
             ThreadPool.QueueUserWorkItem(static s => s.Handler.Invoke(new HotKeyEventArgs(s.Profile, s.Handle, s.Position)),
                 new State(handler, profile, handle, e.Position), false);
@@ -77,20 +97,23 @@ public sealed class Mouse : IHook
 
     private bool IsDoubleClick(Key currentKey)
     {
-        var isDoubleClick = false;
-        
-        var now = Environment.TickCount;
-        if (now - _lastClickTime < 500 && _lastClickKey == currentKey)
-            isDoubleClick = true;
-        
-        _lastClickTime = now;
+        var nowTicks = Stopwatch.GetTimestamp();
+        var isDoubleClick = _lastClickTicks != 0 &&
+                            _lastClickKey == currentKey &&
+                            !Helper.IsTimeUp(_lastClickTicks, 500);
+
+        _lastClickTicks = nowTicks;
         _lastClickKey = currentKey;
         return isDoubleClick;
     }
 
     public void Dispose()
     {
-        StopHook();
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+
+        _lowLevelMouseHook.Down -= LowLevelMouseHook_Down;
+        _lowLevelMouseHook.Stop();
         _lowLevelMouseHook.Dispose();
     }
 

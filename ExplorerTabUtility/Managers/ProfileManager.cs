@@ -19,6 +19,7 @@ public class ProfileManager
 
     public event Action? KeybindingsHookStarted;
     public event Action? KeybindingsHookStopped;
+    public event Action<IReadOnlyList<HotKeyProfile>>? ProfilesUpdated;
 
     public ProfileManager(Panel profilePanel)
     {
@@ -82,8 +83,12 @@ public class ProfileManager
     public void SetProfileEnabledFromTray(HotKeyProfile profile, bool enabled)
     {
         // Find and update in saved profiles (for tray menu)
-        var savedProfile = _savedProfiles.First(p => p.Id == profile.Id);
-        savedProfile.IsEnabled = enabled;
+        var savedProfile = _savedProfiles.FirstOrDefault(p => p.Id == profile.Id);
+        if (savedProfile != null)
+            savedProfile.IsEnabled = enabled;
+
+        // Publish updated immutable snapshot to low-level hooks
+        ProfilesUpdated?.Invoke(_savedProfiles.ToArray());
 
         // Find and update in temp profiles (for panel)
         var tempProfile = _tempProfiles.FirstOrDefault(p => p.Id == profile.Id);
@@ -109,6 +114,9 @@ public class ProfileManager
         {
             _savedProfiles.Add(profile.Clone());
         }
+
+        // Publish immutable snapshot to hooks (thread-safe!)
+        ProfilesUpdated?.Invoke(_savedProfiles.ToArray());
 
         // Save to settings
         SettingsManager.HotKeyProfiles = JsonSerializer.Serialize(_savedProfiles);

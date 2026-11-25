@@ -3,6 +3,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Threading;
 using Microsoft.Win32;
 using ExplorerTabUtility.WinAPI;
 using ExplorerTabUtility.Managers;
@@ -18,7 +19,9 @@ public partial class MainWindow : Window
     private readonly HookManager _hookManager;
     private readonly ProfileManager _profileManager;
     private readonly SystemTrayIcon _notifyIconManager;
+    private readonly DispatcherTimer _sizeSaveTimer;
     private nint _handle;
+    private Size? _pendingFormSize;
 
     public MainWindow()
     {
@@ -28,19 +31,23 @@ public partial class MainWindow : Window
         Width = SettingsManager.FormSize.Width;
         Height = SettingsManager.FormSize.Height;
 
+        _sizeSaveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+        _sizeSaveTimer.Tick += (_, _) => FlushPendingFormSize();
+
         _profileManager = new ProfileManager(ProfilesPanel);
         _hookManager = new HookManager(_profileManager);
         _notifyIconManager = new SystemTrayIcon(_profileManager, _hookManager, ShowWindow);
 
-        SetupEventHandlers();
-        StartHooks();
-
+        // Initialize checkbox states BEFORE attaching event handlers so startup doesn't spam 6 disk writes
         CbAutoUpdate.IsChecked = SettingsManager.AutoUpdate;
         CbThemeIssue.IsChecked = SettingsManager.HaveThemeIssue;
         CbHideTrayIcon.IsChecked = SettingsManager.IsTrayIconHidden;
         CbAutoSaveProfiles.IsChecked = SettingsManager.SaveProfilesOnExit;
         CbSaveClosedHistory.IsChecked = SettingsManager.SaveClosedHistory;
         CbRestorePreviousWindows.IsChecked = SettingsManager.RestorePreviousWindows;
+
+        SetupEventHandlers();
+        StartHooks();
         UpdateTrayIconVisibility(false);
 
         if (SettingsManager.AutoUpdate)
@@ -106,12 +113,20 @@ public partial class MainWindow : Window
 
     private void ShowWindow()
     {
-        Dispatcher.Invoke(Show);
-        WinApi.RestoreWindowToForeground(_handle);
+        Dispatcher.Invoke(() =>
+        {
+            Show();
+            if (WindowState == WindowState.Minimized)
+                WindowState = WindowState.Normal;
+        });
+
+        if (_handle != 0)
+            WinApi.RestoreWindowToForeground(_handle);
     }
 
     private void HideWindow(bool exit = false)
     {
+        FlushPendingFormSize();
         Dispatcher.BeginInvoke(Hide);
 
         if (CbAutoSaveProfiles.IsChecked != true) return;
@@ -228,8 +243,22 @@ public partial class MainWindow : Window
 
     private void MainWindow_SizeChanged(object? _, SizeChangedEventArgs __)
     {
-        if (WindowState == WindowState.Normal)
-            SettingsManager.FormSize = new Size(Width, Height);
+        if (WindowState != WindowState.Normal) return;
+
+        // Debounce size persistence so resizing doesn't hammer disk on every pixel
+        _pendingFormSize = new Size(Width, Height);
+        _sizeSaveTimer.Stop();
+        _sizeSaveTimer.Start();
+    }
+
+    private void FlushPendingFormSize()
+    {
+        _sizeSaveTimer.Stop();
+        if (_pendingFormSize is { } size)
+        {
+            _pendingFormSize = null;
+            SettingsManager.FormSize = size;
+        }
     }
 
     private void MainWindow_Closing(object? _, System.ComponentModel.CancelEventArgs e)
@@ -241,6 +270,7 @@ public partial class MainWindow : Window
 
     private void OnApplicationExit(object _, ExitEventArgs __)
     {
+        FlushPendingFormSize();
         _notifyIconManager.Dispose();
         _hookManager.Dispose();
     }

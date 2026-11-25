@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using System.Drawing;
+using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Reflection;
@@ -17,11 +18,20 @@ using H.Hooks;
 
 namespace ExplorerTabUtility.Helpers;
 
+public readonly struct HiddenWindowState(bool usedMoveOffScreen, RECT originalRect, bool wasMaximized, bool addedLayeredStyle)
+{
+    public bool UsedMoveOffScreen { get; } = usedMoveOffScreen;
+    public RECT OriginalRect { get; } = originalRect;
+    public bool WasMaximized { get; } = wasMaximized;
+    public bool AddedLayeredStyle { get; } = addedLayeredStyle;
+}
+
 public static class Helper
 {
-    private static int _lastCtrlShiftCheckAt;
-    private static bool _lastCtrlShiftCheckValue;
-    public static readonly ConcurrentDictionary<nint, RECT?> HiddenWindows = new();
+    private static readonly HttpClient SharedHttpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
+    private static long _lastCtrlShiftCheckTicks;
+    private static int _lastCtrlShiftCheckValue;
+    public static readonly ConcurrentDictionary<nint, HiddenWindowState> HiddenWindows = new();
 
     public static Task DoDelayedBackgroundAsync(Action action, int delayMs = 2_000, CancellationToken cancellationToken = default)
     {
@@ -136,7 +146,7 @@ public static class Helper
             if (predicate())
                 return;
 
-            await Task.Delay(sleepMs);
+            await Task.Delay(sleepMs, cancellationToken);
         }
     }
     public static async Task<T> DoUntilConditionAsync<T>(Func<T> action, Predicate<T> predicate, int timeMs = 500, int sleepMs = 20, CancellationToken cancellationToken = default)
@@ -149,7 +159,7 @@ public static class Helper
             if (predicate(result))
                 return result;
 
-            await Task.Delay(sleepMs);
+            await Task.Delay(sleepMs, cancellationToken);
         }
 
         return action();
@@ -164,7 +174,7 @@ public static class Helper
             if (predicate(result))
                 return result;
 
-            await Task.Delay(sleepMs);
+            await Task.Delay(sleepMs, cancellationToken);
         }
 
         return await action();
@@ -181,19 +191,17 @@ public static class Helper
 
                 if (justOnce) return;
             }
-            await Task.Delay(sleepMs);
+            await Task.Delay(sleepMs, cancellationToken);
         }
     }
 
     public static bool IsTimeUp(long startTicks, int timeMs)
     {
-
 #if NET7_0_OR_GREATER
         var elapsedTime = Stopwatch.GetElapsedTime(startTicks);
 #else
         var elapsedTime = GetElapsedTime(startTicks);
 #endif
-
         return elapsedTime.TotalMilliseconds >= timeMs;
     }
     public static TimeSpan GetElapsedTime(long startTicks)
@@ -265,11 +273,26 @@ public static class Helper
 
     public static bool IsExplorerEmptySpace(Point point)
     {
-        var hr = WinApi.AccessibleObjectFromPoint(point, out var accObj, out var childId);
-        if (hr != 0 || childId is not 0) return false;
+        IAccessible? accObj = null;
+        try
+        {
+            var hr = WinApi.AccessibleObjectFromPoint(point, out accObj, out var childId);
+            if (hr != 0 || accObj == null || childId is not 0) return false;
 
-        var role = accObj.get_accRole(0);
-        return role is 0x21; //IAccessible.Role:list (ROLE_SYSTEM_LIST 0x21)
+            var role = accObj.get_accRole(0);
+            return role is 0x21; // IAccessible.Role:list (ROLE_SYSTEM_LIST 0x21)
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            if (accObj != null && Marshal.IsComObject(accObj))
+            {
+                try { Marshal.ReleaseComObject(accObj); } catch { /* ignored */ }
+            }
+        }
     }
     public static bool IsFileExplorerTab(nint tab)
     {
@@ -277,12 +300,19 @@ public static class Helper
     }
     public static bool IsFileExplorerWindow(nint window)
     {
-        return window != 0 && WinApi.IsWindowHasClassName(window, "CabinetWClass");
+        return window != 0 && WinApi.IsWindow(window) && WinApi.IsWindowHasClassName(window, "CabinetWClass");
     }
     public static bool IsFileExplorerForeground(out nint foregroundWindow)
     {
         foregroundWindow = WinApi.GetForegroundWindow();
         return IsFileExplorerWindow(foregroundWindow);
+    }
+    public static bool HasMultipleExplorerTabs(nint window)
+    {
+        if (window == 0) return false;
+        var first = WinApi.FindWindowEx(window, 0, "ShellTabWindowClass", null);
+        if (first == 0) return false;
+        return WinApi.FindWindowEx(window, first, "ShellTabWindowClass", null) != 0;
     }
     public static nint GetAnotherExplorerWindow(nint currentWindow)
     {
@@ -294,36 +324,48 @@ public static class Helper
     public static Task<nint> ListenForNewExplorerWindowAsync(IReadOnlyCollection<nint> currentWindows, int searchTimeMs = 1000)
     {
         return DoUntilNotDefaultAsync(() =>
-                GetAllExplorerWindows()
-                    .Except(currentWindows)
-                    .FirstOrDefault(),
-            searchTimeMs);
+                FindFirstNotIn(GetAllExplorerWindows(), currentWindows),
+            searchTimeMs, 15);
     }
 
     public static nint ListenForNewExplorerTab(IReadOnlyCollection<nint> currentTabs, int searchTimeMs = 1000)
     {
         return DoUntilNotDefault(() =>
-                GetAllExplorerTabs()
-                    .Except(currentTabs)
-                    .FirstOrDefault(),
-            searchTimeMs);
+                FindFirstNotIn(GetAllExplorerTabs(), currentTabs),
+            searchTimeMs, 15);
     }
     public static Task<nint> ListenForNewExplorerTabAsync(IReadOnlyCollection<nint> currentTabs, int searchTimeMs = 1000)
     {
         return DoUntilNotDefaultAsync(() =>
-                GetAllExplorerTabs()
-                    .Except(currentTabs)
-                    .FirstOrDefault(),
-            searchTimeMs);
+                FindFirstNotIn(GetAllExplorerTabs(), currentTabs),
+            searchTimeMs, 15);
     }
     public static Task<nint> ListenForNewExplorerTabAsync(nint window, IReadOnlyCollection<nint> currentTabs, int searchTimeMs = 1000)
     {
         return DoUntilNotDefaultAsync(() =>
-                GetAllExplorerTabs(window)
-                    .Except(currentTabs)
-                    .FirstOrDefault(),
-            searchTimeMs);
+                FindFirstNotIn(GetAllExplorerTabs(window), currentTabs),
+            searchTimeMs, 15);
     }
+
+    private static nint FindFirstNotIn(IEnumerable<nint> candidates, IReadOnlyCollection<nint> existing)
+    {
+        foreach (var candidate in candidates)
+        {
+            var found = false;
+            foreach (var item in existing)
+            {
+                if (item == candidate)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                return candidate;
+        }
+        return 0;
+    }
+
     public static List<nint> GetAllExplorerTabs()
     {
         var tabs = new List<nint>();
@@ -341,99 +383,167 @@ public static class Helper
     {
         return WinApi.FindAllWindowsEx("CabinetWClass");
     }
-    public static Process? GetMainExplorerProcess()
+
+    /// <summary>
+    /// Returns the PID of the main explorer.exe shell process without allocating or leaking Process objects.
+    /// </summary>
+    public static int GetMainExplorerProcessId()
     {
-        Process? best = null;
+        var bestPid = 0;
         var windowsFolder = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
         var expectedPath = System.IO.Path.Combine(windowsFolder, "explorer.exe");
-        var bestStart = DateTime.MaxValue;
+        var bestStart = long.MaxValue;
 
         foreach (var hWnd in WinApi.FindAllWindowsEx("Shell_TrayWnd")) // Taskbar
         {
-            if (WinApi.GetWindowThreadProcessId(hWnd, out var pid) <= 0) continue;
-        
-            var processPath = WinApi.GetProcessPath((int)pid);
+            if (WinApi.GetWindowThreadProcessId(hWnd, out var pid) == 0 || pid == 0) continue;
+
+            var processPath = WinApi.GetProcessPathAndCreationTime((int)pid, out var creationTime);
             if (!string.Equals(processPath, expectedPath, StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            try
+            if (creationTime < bestStart || bestPid == 0)
             {
-                // Pick the earliest start
-                var proc = Process.GetProcessById((int)pid);
-                if (proc.StartTime < bestStart)
-                {
-                    bestStart = proc.StartTime;
-                    best = proc;
-                }
+                bestStart = creationTime;
+                bestPid = (int)pid;
             }
-            catch { /* The Process might have terminated */ }
         }
-        return best;
+
+        return bestPid;
     }
-    
-    public static void UpdateWindowLayered(nint hWnd, bool remove)
+
+    public static Process? GetMainExplorerProcess()
     {
+        var pid = GetMainExplorerProcessId();
+        if (pid <= 0) return null;
+
+        try
+        {
+            return Process.GetProcessById(pid);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public static bool UpdateWindowLayered(nint hWnd, bool remove)
+    {
+        if (hWnd == 0 || !WinApi.IsWindow(hWnd)) return false;
+
         var exStyle = WinApi.GetWindowLong(hWnd, WinApi.GWL_EXSTYLE);
         var isLayered = (exStyle & WinApi.WS_EX_LAYERED) != 0;
-        
-        if (remove && isLayered) // Remove
+
+        if (remove && isLayered)
+        {
             WinApi.SetWindowLong(hWnd, WinApi.GWL_EXSTYLE, exStyle & ~WinApi.WS_EX_LAYERED);
-        
-        if (!remove && !isLayered) // Add
+            return true;
+        }
+
+        if (!remove && !isLayered)
+        {
             WinApi.SetWindowLong(hWnd, WinApi.GWL_EXSTYLE, exStyle | WinApi.WS_EX_LAYERED);
+            return true;
+        }
+
+        return false;
     }
+
     public static void HideWindow(nint hWnd, bool keepTheme = false)
     {
-        HiddenWindows.GetOrAdd(hWnd, static (hWnd, keepTheme) =>
-        {
-            if (keepTheme)
-            {
-                WinApi.GetWindowRect(hWnd, out var originalPos);
-                HiddenWindows[hWnd] = originalPos;
+        if (hWnd == 0 || !WinApi.IsWindow(hWnd) || HiddenWindows.ContainsKey(hWnd))
+            return;
 
-                // Move it off-screen
-                const uint flags = WinApi.SWP_HIDEWINDOW | WinApi.SWP_NOSIZE | WinApi.SWP_NOZORDER | WinApi.SWP_NOACTIVATE | WinApi.SWP_FRAMECHANGED;
-                WinApi.SetWindowPos(hWnd, 0, -32_000, -32_000, 0, 0, flags);
-                return originalPos;
+        HiddenWindows.GetOrAdd(hWnd, static (handle, useMoveOffScreen) =>
+        {
+            if (useMoveOffScreen)
+            {
+                var wasMaximized = WinApi.IsZoomed(handle);
+                WinApi.GetWindowRect(handle, out var originalPos);
+
+                // Hide & move off-screen WITHOUT SWP_FRAMECHANGED so Win11 XAML Island tab strip frame is not corrupted
+                const uint flags = WinApi.SWP_HIDEWINDOW | WinApi.SWP_NOSIZE | WinApi.SWP_NOZORDER | WinApi.SWP_NOACTIVATE;
+                WinApi.SetWindowPos(handle, 0, -32_000, -32_000, 0, 0, flags);
+                return new HiddenWindowState(true, originalPos, wasMaximized, false);
             }
 
-            // Set the transparency (alpha value) of the window (0 = transparent, 255 = opaque)
-            UpdateWindowLayered(hWnd, remove: false);
-            WinApi.SetLayeredWindowAttributes(hWnd, 0, 0, WinApi.LWA_ALPHA);
-            return null;
+            // Set transparency (alpha = 0) and remember whether WE added WS_EX_LAYERED
+            var addedLayered = UpdateWindowLayered(handle, remove: false);
+            WinApi.SetLayeredWindowAttributes(handle, 0, 0, WinApi.LWA_ALPHA);
+            return new HiddenWindowState(false, default, false, addedLayered);
         }, keepTheme);
     }
+
     public static bool ShowWindow(nint hWnd, bool removeCache)
     {
-        if (!HiddenWindows.TryGetValue(hWnd, out var originalPos))
-            return false;
+        if (hWnd == 0) return false;
 
+        HiddenWindowState state;
         if (removeCache)
-            HiddenWindows.TryRemove(hWnd, out _);
-
-        if (originalPos != null) // keep theme
         {
-            const uint flags = WinApi.SWP_SHOWWINDOW | WinApi.SWP_NOSIZE | WinApi.SWP_NOZORDER | WinApi.SWP_NOACTIVATE | WinApi.SWP_FRAMECHANGED;
-            WinApi.SetWindowPos(hWnd, 0, originalPos.Value.Left, originalPos.Value.Top, 0, 0, flags);
+            if (!HiddenWindows.TryRemove(hWnd, out state))
+                return false;
+        }
+        else
+        {
+            if (!HiddenWindows.TryGetValue(hWnd, out state))
+                return false;
+        }
+
+        if (!WinApi.IsWindow(hWnd))
+        {
+            HiddenWindows.TryRemove(hWnd, out _);
+            return false;
+        }
+
+        if (state.UsedMoveOffScreen)
+        {
+            // Restore WITHOUT SWP_FRAMECHANGED to preserve Windows 11 XAML Island tab-strip hit-testing
+            const uint flags = WinApi.SWP_SHOWWINDOW | WinApi.SWP_NOSIZE | WinApi.SWP_NOZORDER | WinApi.SWP_NOACTIVATE;
+            if (state.OriginalRect.Left > -10_000 && state.OriginalRect.Top > -10_000)
+                WinApi.SetWindowPos(hWnd, 0, state.OriginalRect.Left, state.OriginalRect.Top, 0, 0, flags);
+            else
+                WinApi.SetWindowPos(hWnd, 0, 0, 0, 0, 0, flags | WinApi.SWP_NOMOVE);
+
+            if (state.WasMaximized)
+                WinApi.ShowWindow(hWnd, WinApi.SW_SHOWMAXIMIZED);
+
             return true;
         }
 
         WinApi.SetLayeredWindowAttributes(hWnd, 0, 255, WinApi.LWA_ALPHA);
+        if (state.AddedLayeredStyle)
+            UpdateWindowLayered(hWnd, remove: true);
+
         return true;
+    }
+
+    /// <summary>
+    /// Restores any windows still tracked in HiddenWindows (safety net on shutdown, explorer crash, or wake from sleep).
+    /// </summary>
+    public static void RestoreAllHiddenWindows()
+    {
+        foreach (var hWnd in HiddenWindows.Keys.ToArray())
+        {
+            ShowWindow(hWnd, removeCache: true);
+        }
     }
 
     public static bool IsCtrlShiftDown()
     {
-        if (_lastCtrlShiftCheckValue && Environment.TickCount - _lastCtrlShiftCheckAt < 1_000)
+        var lastTicks = Volatile.Read(ref _lastCtrlShiftCheckTicks);
+        if (Volatile.Read(ref _lastCtrlShiftCheckValue) != 0 && lastTicks != 0 && !IsTimeUp(lastTicks, 800))
             return true;
-        
-        _lastCtrlShiftCheckValue =
+
+        var isDown =
             (KeyboardSimulator.IsKeyPressed((int)VirtualKey.LeftControl) || KeyboardSimulator.IsKeyPressed((int)VirtualKey.RightControl)) &&
-               (KeyboardSimulator.IsKeyPressed((int)VirtualKey.LeftShift) || KeyboardSimulator.IsKeyPressed((int)VirtualKey.RightShift));
-        
-        _lastCtrlShiftCheckAt = Environment.TickCount;
-        return _lastCtrlShiftCheckValue;
+            (KeyboardSimulator.IsKeyPressed((int)VirtualKey.LeftShift) || KeyboardSimulator.IsKeyPressed((int)VirtualKey.RightShift));
+
+        Volatile.Write(ref _lastCtrlShiftCheckValue, isDown ? 1 : 0);
+        Volatile.Write(ref _lastCtrlShiftCheckTicks, Stopwatch.GetTimestamp());
+        return isDown;
     }
+
     public static void BypassWinForegroundRestrictions()
     {
         // Simulate a key press to bypass the Foreground restriction
@@ -443,6 +553,9 @@ public static class Helper
 
     public static string NormalizeLocation(string location)
     {
+        if (string.IsNullOrEmpty(location))
+            return string.Empty;
+
         if (location.IndexOf('%') > -1)
             location = Environment.ExpandEnvironmentVariables(location);
 
@@ -461,20 +574,28 @@ public static class Helper
         var id = RegistryManager.GetDefaultExplorerLaunchId();
         var location = id switch
         {
-            2 => "shell:::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}",// Home, Quick Access
-            3 => "shell:::{088E3905-0323-4B02-9826-5D99428E115F}",// Downloads
-            4 => "shell:::{018D5C66-4533-4307-9B53-224DE2ED1FE6}",// OneDrive
-            _ => "shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}" // This PC
+            2 => "shell:::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}", // Home, Quick Access
+            3 => "shell:::{088E3905-0323-4B02-9826-5D99428E115F}", // Downloads
+            4 => "shell:::{018D5C66-4533-4307-9B53-224DE2ED1FE6}", // OneDrive
+            _ => "shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"  // This PC
         };
 
         if (shellPathComparer == null)
             return location;
 
         var pidl = shellPathComparer.GetPidlFromPath(location);
-        var path = ShellPathComparer.GetPathFromPidl(pidl); //SIGDN_URL: Downloads -> file:///C:/Users/Username/Downloads
-        Marshal.FreeCoTaskMem(pidl);
+        if (pidl == 0)
+            return NormalizeLocation(location);
 
-        return NormalizeLocation(path ?? location);
+        try
+        {
+            var path = ShellPathComparer.GetPathFromPidl(pidl); // SIGDN_URL: Downloads -> file:///C:/Users/Username/Downloads
+            return NormalizeLocation(path ?? location);
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(pidl);
+        }
     }
 
     public static string GetExecutablePath()
@@ -487,8 +608,7 @@ public static class Helper
     {
         try
         {
-            using var client = new System.Net.Http.HttpClient();
-            var svgContent = await client.GetStringAsync("https://cdn.jsdelivr.net/gh/w4po/sponsors/sponsors.svg");
+            var svgContent = await SharedHttpClient.GetStringAsync("https://cdn.jsdelivr.net/gh/w4po/sponsors/sponsors.svg");
 
             var supporters = new List<SupporterInfo>();
             var xmlDoc = new System.Xml.XmlDocument();

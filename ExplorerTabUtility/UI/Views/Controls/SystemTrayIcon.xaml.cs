@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Controls;
@@ -60,20 +61,33 @@ public partial class SystemTrayIcon : UserControl, IDisposable
 
     private void HookManager_OnShellInitialized()
     {
-        // Workaround for hardcodet/wpf-notifyicon bug: repeatedly hide icon when explorer.exe restarts
-        if (TrayIcon.Visibility == Visibility.Visible) return;
-        Helper.DoUntilTimeEnd(HideTrayIcon, 7000, 1000);
-        return;
-        
-        void HideTrayIcon()
+        // Workaround for hardcodet/wpf-notifyicon bug: repeatedly hide icon when explorer.exe restarts.
+        // Check SettingsManager (thread-safe!) instead of reading TrayIcon.Visibility from a background thread.
+        if (!SettingsManager.IsTrayIconHidden) return;
+
+        _ = Task.Run(async () =>
         {
-            TrayIcon.Dispatcher.BeginInvoke(() =>
+            for (var i = 0; i < 7; i++)
             {
-                if (TrayIcon.Visibility == Visibility.Visible) return;
-                TrayIcon.Visibility = Visibility.Hidden;
-                TrayIcon.Visibility = Visibility.Collapsed;
-            });
-        }
+                if (!SettingsManager.IsTrayIconHidden) return;
+
+                try
+                {
+                    await TrayIcon.Dispatcher.InvokeAsync(() =>
+                    {
+                        if (TrayIcon.Visibility == Visibility.Visible) return;
+                        TrayIcon.Visibility = Visibility.Hidden;
+                        TrayIcon.Visibility = Visibility.Collapsed;
+                    }).Task;
+                }
+                catch
+                {
+                    return;
+                }
+
+                await Task.Delay(1000);
+            }
+        });
     }
     
     private void HookManager_OnWindowHookToggled()
@@ -244,6 +258,9 @@ public partial class SystemTrayIcon : UserControl, IDisposable
 
     public void Dispose()
     {
+        _hookManager.OnShellInitialized -= HookManager_OnShellInitialized;
+        _hookManager.OnWindowHookToggled -= HookManager_OnWindowHookToggled;
+        _hookManager.OnReuseTabsToggled -= HookManager_OnReuseTabsToggled;
         TrayIcon.Dispose();
         GC.SuppressFinalize(this);
     }

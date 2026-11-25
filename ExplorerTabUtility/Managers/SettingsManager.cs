@@ -11,6 +11,7 @@ namespace ExplorerTabUtility.Managers;
 
 public static class SettingsManager
 {
+    private static readonly object SaveLock = new();
     private static readonly AppSettings Settings;
     public static event EventHandler<PropertyChangedEventArgs>? StaticPropertyChanged;
 
@@ -51,6 +52,7 @@ public static class SettingsManager
         get => Settings.MouseHook;
         set
         {
+            if (Settings.MouseHook == value) return;
             Settings.MouseHook = value;
             SaveSettings();
             NotifyStaticPropertyChanged();
@@ -62,6 +64,7 @@ public static class SettingsManager
         get => Settings.KeyboardHook;
         set
         {
+            if (Settings.KeyboardHook == value) return;
             Settings.KeyboardHook = value;
             SaveSettings();
             NotifyStaticPropertyChanged();
@@ -73,6 +76,7 @@ public static class SettingsManager
         get => Settings.WindowHook;
         set
         {
+            if (Settings.WindowHook == value) return;
             Settings.WindowHook = value;
             SaveSettings();
             NotifyStaticPropertyChanged();
@@ -84,6 +88,7 @@ public static class SettingsManager
         get => Settings.ReuseTabs;
         set
         {
+            if (Settings.ReuseTabs == value) return;
             Settings.ReuseTabs = value;
             SaveSettings();
             NotifyStaticPropertyChanged();
@@ -95,6 +100,7 @@ public static class SettingsManager
         get => Settings.HotKeyProfiles;
         set
         {
+            if (Settings.HotKeyProfiles == value) return;
             Settings.HotKeyProfiles = value;
             SaveSettings();
         }
@@ -105,6 +111,7 @@ public static class SettingsManager
         get => Settings.FormSize;
         set
         {
+            if (Settings.FormSize == value) return;
             Settings.FormSize = value;
             SaveSettings();
         }
@@ -115,6 +122,7 @@ public static class SettingsManager
         get => Settings.SaveProfilesOnExit;
         set
         {
+            if (Settings.SaveProfilesOnExit == value) return;
             Settings.SaveProfilesOnExit = value;
             SaveSettings();
         }
@@ -125,6 +133,7 @@ public static class SettingsManager
         get => Settings.IsFirstRun;
         set
         {
+            if (Settings.IsFirstRun == value) return;
             Settings.IsFirstRun = value;
             SaveSettings();
         }
@@ -135,6 +144,7 @@ public static class SettingsManager
         get => Settings.IsTrayIconHidden;
         set
         {
+            if (Settings.IsTrayIconHidden == value) return;
             Settings.IsTrayIconHidden = value;
             SaveSettings();
         }
@@ -145,6 +155,7 @@ public static class SettingsManager
         get => Settings.HaveThemeIssue;
         set
         {
+            if (Settings.HaveThemeIssue == value) return;
             Settings.HaveThemeIssue = value;
             SaveSettings();
         }
@@ -155,6 +166,7 @@ public static class SettingsManager
         get => Settings.AutoUpdate;
         set
         {
+            if (Settings.AutoUpdate == value) return;
             Settings.AutoUpdate = value;
             SaveSettings();
         }
@@ -165,6 +177,7 @@ public static class SettingsManager
         get => Settings.SaveClosedWindows;
         set
         {
+            if (Settings.SaveClosedWindows == value) return;
             Settings.SaveClosedWindows = value;
             SaveSettings();
         }
@@ -175,6 +188,7 @@ public static class SettingsManager
         get => Settings.RestorePreviousWindows;
         set
         {
+            if (Settings.RestorePreviousWindows == value) return;
             Settings.RestorePreviousWindows = value;
             SaveSettings();
         }
@@ -190,17 +204,38 @@ public static class SettingsManager
         }
     }
 
-
     public static void SaveSettings()
     {
-        try
+        lock (SaveLock)
         {
-            var json = JsonSerializer.Serialize(Settings);
-            File.WriteAllText(SettingsFilePath, json);
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"Failed to save settings: {ex.Message}");
+            try
+            {
+                var json = JsonSerializer.Serialize(Settings);
+                var tempPath = SettingsFilePath + ".tmp";
+                File.WriteAllText(tempPath, json);
+
+                if (File.Exists(SettingsFilePath))
+                {
+                    File.Replace(tempPath, SettingsFilePath, null);
+                }
+                else
+                {
+                    File.Move(tempPath, SettingsFilePath);
+                }
+            }
+            catch
+            {
+                // Fallback direct write if atomic replace is blocked by AV/sync lock
+                try
+                {
+                    var json = JsonSerializer.Serialize(Settings);
+                    File.WriteAllText(SettingsFilePath, json);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Failed to save settings: {ex.Message}");
+                }
+            }
         }
     }
 }

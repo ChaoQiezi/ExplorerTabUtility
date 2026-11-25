@@ -1,7 +1,9 @@
 using System;
 using System.Linq;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using System.Collections.Generic;
 using ExplorerTabUtility.Models;
 using ExplorerTabUtility.Helpers;
@@ -14,7 +16,8 @@ public partial class HotKeyProfileControl : UserControl
 {
     // Fields
     private Key _lastClickKey;
-    private int _lastClickTime;
+    private long _lastClickTicks;
+    private Rect _cachedHotkeyBoxScreenRect;
     private readonly HotKeyProfile _profile;
     private readonly Action<HotKeyProfile>? _removeAction;
     private readonly Action? _keybindingHookStarted;
@@ -42,6 +45,7 @@ public partial class HotKeyProfileControl : UserControl
 
         InitializeControls();
         SetupEventHandlers();
+        Unloaded += (_, _) => DisposeKeybindingHooks();
     }
 
     // Initialize controls with hot key profile data
@@ -105,7 +109,13 @@ public partial class HotKeyProfileControl : UserControl
     private void NDelayValueChanged(object? _, RoutedPropertyChangedEventArgs<double> e) => _profile.Delay = (int)e.NewValue;
     private void CbHandled_CheckedChanged(object _, RoutedEventArgs __) => _profile.IsHandled = CbHandled.IsChecked ?? true;
     private void CbOpenAsTab_CheckedChanged(object _, RoutedEventArgs __) => _profile.IsAsTab = CbOpenAsTab.IsChecked ?? true;
-    private void BtnDelete_Click(object _, RoutedEventArgs __) => _removeAction?.Invoke(_profile);
+
+    private void BtnDelete_Click(object _, RoutedEventArgs __)
+    {
+        DisposeKeybindingHooks();
+        _removeAction?.Invoke(_profile);
+    }
+
     private void TxtHotKeys_KeyDown(object sender, System.Windows.Input.KeyboardEventArgs e) => e.Handled = true;
     private void TxtHotKeys_Enter(object _, RoutedEventArgs __) => InitializeKeybindingHooks();
 
@@ -123,8 +133,9 @@ public partial class HotKeyProfileControl : UserControl
         // Backspace removes the hotkey.
         if (e.Keys.Are(Key.Back))
         {
-            Dispatcher.Invoke(() => TxtHotKeys.Text = string.Empty);
             _profile.HotKeys = null;
+            // NEVER block low-level Windows input hook with synchronous Dispatcher.Invoke!
+            Dispatcher.BeginInvoke(() => TxtHotKeys.Text = string.Empty);
             return;
         }
 
@@ -146,7 +157,11 @@ public partial class HotKeyProfileControl : UserControl
         var isDoubleClick = false;
         if (e.Keys.Values.Any(k => k is >= Key.MouseLeft and <= Key.MouseXButton2))
         {
-            if (!IsMouseOverHotkeyTextBox())
+            var isOverBox = e is MouseEventArgs mouseArgs
+                ? _cachedHotkeyBoxScreenRect.Contains(mouseArgs.Position.X, mouseArgs.Position.Y)
+                : false;
+
+            if (!isOverBox)
                 MoveFocus(null); // Remove focus / stop hooks
             else
             {
@@ -170,7 +185,8 @@ public partial class HotKeyProfileControl : UserControl
         _profile.IsMouse = isMouse;
         _profile.IsDoubleClick = isDoubleClick;
 
-        Dispatcher.Invoke(() => TxtHotKeys.Text = keys.HotKeysToString(isDoubleClick));
+        var display = keys.HotKeysToString(isDoubleClick);
+        Dispatcher.BeginInvoke(() => TxtHotKeys.Text = display);
     }
 
     private void MoveFocus(System.Windows.Input.FocusNavigationDirection? direction)
@@ -213,25 +229,29 @@ public partial class HotKeyProfileControl : UserControl
         return false;
     }
 
-    private bool IsMouseOverHotkeyTextBox()
+    private void UpdateCachedHotkeyBoxScreenRect()
     {
-        return Dispatcher.Invoke(() =>
+        try
         {
-            var mousePos = System.Windows.Input.Mouse.GetPosition(TxtHotKeys);
-            return mousePos.X >= 0 && mousePos.X <= TxtHotKeys.ActualWidth &&
-                   mousePos.Y >= 0 && mousePos.Y <= TxtHotKeys.ActualHeight;
-        });
+            // PointToScreen returns physical screen pixels, matching WH_MOUSE_LL coordinates!
+            var topLeft = TxtHotKeys.PointToScreen(new Point(0, 0));
+            var bottomRight = TxtHotKeys.PointToScreen(new Point(TxtHotKeys.ActualWidth, TxtHotKeys.ActualHeight));
+            _cachedHotkeyBoxScreenRect = new Rect(topLeft, bottomRight);
+        }
+        catch
+        {
+            _cachedHotkeyBoxScreenRect = Rect.Empty;
+        }
     }
 
     private bool IsDoubleClick(Key currentKey)
     {
-        var isDoubleClick = false;
+        var nowTicks = Stopwatch.GetTimestamp();
+        var isDoubleClick = _lastClickTicks != 0 &&
+                            _lastClickKey == currentKey &&
+                            !Helper.IsTimeUp(_lastClickTicks, 500);
 
-        var now = Environment.TickCount;
-        if (now - _lastClickTime < 500 && _lastClickKey == currentKey)
-            isDoubleClick = true;
-
-        _lastClickTime = now;
+        _lastClickTicks = nowTicks;
         _lastClickKey = currentKey;
         return isDoubleClick;
     }
@@ -290,7 +310,7 @@ public partial class HotKeyProfileControl : UserControl
                 CbOpenAsTab.IsEnabled = false;
                 break;
         }
-        
+
         // If the name is empty or is an exact match of an action, set it to the hotkey.
         var isExactMatch = Enum.GetNames(typeof(HotKeyAction)).Any(a => a == TxtName.Text);
         if (string.IsNullOrWhiteSpace(TxtName.Text) || isExactMatch)
@@ -322,6 +342,7 @@ public partial class HotKeyProfileControl : UserControl
     private void InitializeKeybindingHooks()
     {
         DisposeKeybindingHooks(false);
+        UpdateCachedHotkeyBoxScreenRect();
         _keybindingHookStarted?.Invoke();
 
         _lowLevelKeyboardHook = new LowLevelKeyboardHook { Handling = true };
@@ -335,8 +356,11 @@ public partial class HotKeyProfileControl : UserControl
 
     private void DisposeKeybindingHooks(bool inform = true)
     {
+        var hadHooks = _lowLevelKeyboardHook != null || _lowLevelMouseHook != null;
+
         if (_lowLevelKeyboardHook != null)
         {
+            _lowLevelKeyboardHook.Down -= LowLevelHook_Down;
             _lowLevelKeyboardHook.Stop();
             _lowLevelKeyboardHook.Dispose();
             _lowLevelKeyboardHook = null;
@@ -344,12 +368,13 @@ public partial class HotKeyProfileControl : UserControl
 
         if (_lowLevelMouseHook != null)
         {
+            _lowLevelMouseHook.Down -= LowLevelHook_Down;
             _lowLevelMouseHook.Stop();
             _lowLevelMouseHook.Dispose();
             _lowLevelMouseHook = null;
         }
 
-        if (inform)
+        if (inform && hadHooks)
             _keybindingHookStopped?.Invoke();
     }
 }

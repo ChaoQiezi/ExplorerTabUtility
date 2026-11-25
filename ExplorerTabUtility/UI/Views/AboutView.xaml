@@ -38,7 +38,7 @@
                 EasingFunction="{StaticResource EaseOutFunction}" />
         </Storyboard>
 
-        <Storyboard x:Key="StarContinuousAnimation" RepeatBehavior="Forever">
+        <Storyboard x:Key="StarContinuousAnimation" RepeatBehavior="Forever" Timeline.DesiredFrameRate="24">
             <DoubleAnimation
                 Storyboard.TargetName="StarIcon"
                 Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
@@ -82,19 +82,7 @@
                 EasingFunction="{StaticResource EaseOutBack}" />
         </Storyboard>
 
-        <Storyboard x:Key="TitleAnimation" RepeatBehavior="Forever">
-            <DoubleAnimation
-                Storyboard.TargetProperty="(UIElement.Effect).(DropShadowEffect.ShadowDepth)"
-                From="0" To="2" Duration="0:0:2"
-                AutoReverse="True"
-                RepeatBehavior="Forever"
-                EasingFunction="{StaticResource EaseOutFunction}" />
-            <DoubleAnimation
-                Storyboard.TargetProperty="(UIElement.Effect).(DropShadowEffect.BlurRadius)"
-                From="10" To="20" Duration="0:0:2"
-                AutoReverse="True"
-                RepeatBehavior="Forever"
-                EasingFunction="{StaticResource EaseOutFunction}" />
+        <Storyboard x:Key="TitleAnimation" RepeatBehavior="Forever" Timeline.DesiredFrameRate="24">
             <DoubleAnimation
                 Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
                 From="-2" To="2" Duration="0:0:4"
@@ -103,19 +91,7 @@
                 EasingFunction="{StaticResource EaseOutFunction}" />
         </Storyboard>
 
-        <Storyboard x:Key="IconAnimation" RepeatBehavior="Forever">
-            <DoubleAnimation
-                Storyboard.TargetProperty="(UIElement.Effect).(DropShadowEffect.BlurRadius)"
-                From="15" To="25" Duration="0:0:2"
-                AutoReverse="True"
-                RepeatBehavior="Forever"
-                EasingFunction="{StaticResource EaseOutFunction}" />
-            <ColorAnimation
-                Storyboard.TargetProperty="(UIElement.Effect).(DropShadowEffect.Color)"
-                From="#4FC3F7" To="#03A9F4" Duration="0:0:2"
-                AutoReverse="True"
-                RepeatBehavior="Forever"
-                EasingFunction="{StaticResource EaseOutFunction}" />
+        <Storyboard x:Key="IconAnimation" RepeatBehavior="Forever" Timeline.DesiredFrameRate="24">
             <DoubleAnimation
                 Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
                 From="0" To="360" Duration="0:0:20"
@@ -123,19 +99,7 @@
                 EasingFunction="{StaticResource EaseOutFunction}" />
         </Storyboard>
 
-        <Storyboard x:Key="DeveloperNameAnimation" RepeatBehavior="Forever">
-            <DoubleAnimation
-                Storyboard.TargetProperty="(UIElement.Effect).(DropShadowEffect.BlurRadius)"
-                From="4" To="8" Duration="0:0:4"
-                AutoReverse="True"
-                RepeatBehavior="Forever"
-                EasingFunction="{StaticResource EaseOutFunction}" />
-            <ColorAnimation
-                Storyboard.TargetProperty="(UIElement.Effect).(DropShadowEffect.Color)"
-                From="#9575CD" To="#7E57C2" Duration="0:0:4"
-                AutoReverse="True"
-                RepeatBehavior="Forever"
-                EasingFunction="{StaticResource EaseOutFunction}" />
+        <Storyboard x:Key="DeveloperNameAnimation" RepeatBehavior="Forever" Timeline.DesiredFrameRate="24">
             <DoubleAnimation
                 Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
                 From="-0.5" To="0.5" Duration="0:0:5"
@@ -351,7 +315,8 @@
                         Background="{StaticResource CardGradientBrush}"
                         Padding="24,20">
                     <StackPanel HorizontalAlignment="Center">
-                        <Border Width="90"
+                        <Border x:Name="LogoBorder"
+                                Width="90"
                                 Height="90"
                                 BorderBrush="{StaticResource BorderGradientBrush}"
                                 BorderThickness="1"
@@ -371,15 +336,11 @@
                             <Border.Background>
                                 <ImageBrush ImageSource="pack://application:,,,/Icon.ico" />
                             </Border.Background>
-                            <Border.Triggers>
-                                <EventTrigger RoutedEvent="Loaded">
-                                    <BeginStoryboard Storyboard="{StaticResource IconAnimation}" />
-                                </EventTrigger>
-                            </Border.Triggers>
                         </Border>
 
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                            <TextBlock Text="Explorer Tab Utility"
+                            <TextBlock x:Name="TitleText"
+                                       Text="Explorer Tab Utility"
                                        Style="{StaticResource AppTitleStyle}"
                                        MouseLeftButtonUp="OpenProjectPage">
                                 <TextBlock.Effect>
@@ -391,11 +352,6 @@
                                 <TextBlock.RenderTransform>
                                     <TranslateTransform />
                                 </TextBlock.RenderTransform>
-                                <TextBlock.Triggers>
-                                    <EventTrigger RoutedEvent="Loaded">
-                                        <BeginStoryboard Storyboard="{StaticResource TitleAnimation}" />
-                                    </EventTrigger>
-                                </TextBlock.Triggers>
                             </TextBlock>
 
                             <TextBlock Text="{Binding Version, RelativeSource={RelativeSource AncestorType=views:AboutView}}"
@@ -414,11 +370,7 @@
                                 Style="{StaticResource GitHubButtonStyle}"
                                 Click="OpenProjectPage">
                             <Button.Triggers>
-                                <EventTrigger RoutedEvent="Loaded">
-                                    <BeginStoryboard Name="ContinuousStarStoryboard" Storyboard="{StaticResource StarContinuousAnimation}" />
-                                </EventTrigger>
                                 <EventTrigger RoutedEvent="Button.Click">
-                                    <StopStoryboard BeginStoryboardName="ContinuousStarStoryboard" />
                                     <BeginStoryboard>
                                         <Storyboard Completed="StarClickAnimation_Completed">
                                             <DoubleAnimation
@@ -544,18 +496,16 @@
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
 
-                                    <!-- Developer Avatar -->
-                                    <Border Margin="0,0,16,0"
+                                    <!-- Developer Avatar (loaded lazily when About tab is opened) -->
+                                    <Border x:Name="DeveloperAvatarBorder"
+                                            Margin="0,0,16,0"
                                             Style="{StaticResource SupporterAvatarStyle}"
-                                            MouseLeftButtonUp="OpenDeveloperPage">
-                                        <Border.Background>
-                                            <ImageBrush ImageSource="https://avatars.githubusercontent.com/u/6666887?s=160" />
-                                        </Border.Background>
-                                    </Border>
+                                            MouseLeftButtonUp="OpenDeveloperPage" />
 
                                     <!-- Developer Info -->
                                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                        <TextBlock Text="Abd-Alrahman Ghanem"
+                                        <TextBlock x:Name="DeveloperNameText"
+                                                   Text="Abd-Alrahman Ghanem"
                                                    FontWeight="SemiBold"
                                                    FontSize="16"
                                                    Cursor="Hand"
@@ -563,18 +513,13 @@
                                                    Foreground="{StaticResource TextPrimaryBrush}">
                                             <TextBlock.Effect>
                                                 <DropShadowEffect Color="#9575CD"
-                                                                  BlurRadius="4"
+                                                                  BlurRadius="6"
                                                                   ShadowDepth="0"
                                                                   Opacity="0.5" />
                                             </TextBlock.Effect>
                                             <TextBlock.RenderTransform>
                                                 <TranslateTransform />
                                             </TextBlock.RenderTransform>
-                                            <TextBlock.Triggers>
-                                                <EventTrigger RoutedEvent="Loaded">
-                                                    <BeginStoryboard Storyboard="{StaticResource DeveloperNameAnimation}" />
-                                                </EventTrigger>
-                                            </TextBlock.Triggers>
                                         </TextBlock>
                                         <TextBlock Margin="0,4,0,0">
                                             <TextBlock Text="github.com/w4po"

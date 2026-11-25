@@ -156,6 +156,10 @@ public partial class NumericInputControl : UserControl
         BtnDecrement.PreviewMouseLeftButtonUp += Btn_PreviewMouseLeftButtonUp;
         BtnDecrement.MouseLeave += Btn_MouseLeave;
         BtnDecrement.Click += BtnDecrement_Click;
+
+        BtnIncrement.LostMouseCapture += (_, _) => StopRepeatTimer();
+        BtnDecrement.LostMouseCapture += (_, _) => StopRepeatTimer();
+        Unloaded += (_, _) => StopRepeatTimer();
     }
 
     #endregion

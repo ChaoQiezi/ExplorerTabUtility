@@ -161,10 +161,6 @@
                         <!-- Tab Control -->
                         <TabControl Style="{StaticResource CustomTabControlStyle}"
                                     SelectedIndex="{Binding SelectedIndex, ElementName=NavigationList}">
-                            <TabControl.Effect>
-                                <DropShadowEffect ShadowDepth="1" BlurRadius="3" Opacity="0.2"
-                                                  Color="{StaticResource ShadowColor}" />
-                            </TabControl.Effect>
                             <!-- Shortcuts Tab -->
                             <TabItem Header="Shortcuts" Visibility="Collapsed">
                                 <Grid>

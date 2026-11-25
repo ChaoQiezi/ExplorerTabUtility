@@ -11,26 +11,64 @@ using ExplorerTabUtility.Helpers;
 
 namespace ExplorerTabUtility.WinAPI;
 
+[StructLayout(LayoutKind.Sequential)]
+public struct POINT
+{
+    public int X;
+    public int Y;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct MSG
+{
+    public nint hwnd;
+    public uint message;
+    public nuint wParam;
+    public nint lParam;
+    public uint time;
+    public POINT pt;
+}
+
 public static class WinApi
 {
     public const int EVENT_OBJECT_SHOW = 0x8002;
+    public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+    public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
 
-    public const int WM_COMMAND = 0x111; // Send a command
+    public const int WM_QUIT = 0x0012;
+    public const int WM_COMMAND = 0x0111; // Send a command
 
+    public const int SW_SHOWMAXIMIZED = 3;
     public const int SW_SHOWNOACTIVATE = 4; // Show window but not activated
+    public const int SW_RESTORE = 9;
 
     public const uint SWP_NOSIZE = 0x0001;
+    public const uint SWP_NOMOVE = 0x0002;
     public const uint SWP_NOZORDER = 0x0004;
     public const uint SWP_NOACTIVATE = 0x0010;
     public const uint SWP_FRAMECHANGED = 0x0020;
     public const uint SWP_SHOWWINDOW = 0x0040;
     public const uint SWP_HIDEWINDOW = 0x0080;
 
+    public const uint SMTO_NORMAL = 0x0000;
+    public const uint SMTO_BLOCK = 0x0001;
+    public const uint SMTO_ABORTIFHUNG = 0x0002;
+
+    public const uint QS_ALLINPUT = 0x04FF;
+    public const uint MWMO_INPUTAVAILABLE = 0x0004;
+    public const uint PM_REMOVE = 0x0001;
+    public const uint WAIT_OBJECT_0 = 0x00000000;
+    public const uint WAIT_FAILED = 0xFFFFFFFF;
+    public const uint INFINITE = 0xFFFFFFFF;
+
     public const int GWL_EXSTYLE = -20; // Extended window style.
     public const int WS_EX_LAYERED = 0x80000; // Layered window.
     public const int LWA_ALPHA = 0x2; // Determine the opacity of a layered window
 
     public const uint SIGDN_URL = 0x80068000;
+
+    [ThreadStatic]
+    private static StringBuilder? _classNameBuffer;
 
     [DllImport("user32.dll")]
     public static extern nint SetWinEventHook(uint eventMin, uint eventMax, nint hModWinEventProc, WinEventDelegate lPfnWinEventProc, uint idProcess, uint idThread, uint dwFlags);
@@ -66,6 +104,12 @@ public static class WinApi
     public static extern bool IsIconic(nint handle);
 
     [DllImport("user32.dll")]
+    public static extern bool IsZoomed(nint handle);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(nint handle);
+
+    [DllImport("user32.dll")]
     public static extern nint GetForegroundWindow();
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -77,34 +121,59 @@ public static class WinApi
     [DllImport("user32.dll", SetLastError = true)]
     public static extern int GetWindowLong(nint hWnd, int nIndex);
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern int SetWindowLong(nint hWnd, int nIndex, int dwNewLong);
 
     [DllImport("user32.dll")]
     public static extern bool SetLayeredWindowAttributes(nint hWnd, uint crKey, byte bAlpha, uint dwFlags);
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
     public static extern uint RealGetWindowClass(nint hwnd, StringBuilder pszType, uint cchType);
 
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     public static extern nint SendMessage(nint hWnd, uint Msg, nint wParam, nint lParam);
 
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern nint SendMessageTimeout(nint hWnd, uint Msg, nint wParam, nint lParam, uint fuFlags, uint uTimeout, out nint lpdwResult);
+
     [return: MarshalAs(UnmanagedType.Bool)]
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
     public static extern bool PostMessage(nint hWnd, uint Msg, nint wParam, nint lParam);
-    
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern uint GetWindowThreadProcessId(nint hWnd, out uint lpdwProcessId);
-    
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint MsgWaitForMultipleObjectsEx(uint nCount, [In] nint[] pHandles, uint dwMilliseconds, uint dwWakeMask, uint dwFlags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    public static extern bool PeekMessage(out MSG lpMsg, nint hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
+
+    [DllImport("user32.dll")]
+    public static extern bool TranslateMessage(ref MSG lpMsg);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    public static extern nint DispatchMessage(ref MSG lpMsg);
+
+    [return: MarshalAs(UnmanagedType.Bool)]
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern bool PostThreadMessage(uint idThread, uint Msg, nint wParam, nint lParam);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern nint OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
-    
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(nint hObject);
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
     private static extern bool QueryFullProcessImageName(nint hProcess, uint dwFlags, StringBuilder lpExeName, ref int lpdwSize);
-    
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessTimes(nint hProcess, out long lpCreationTime, out long lpExitTime, out long lpKernelTime, out long lpUserTime);
+
     [DllImport("shell32.dll", SetLastError = true)]
     public static extern int SHOpenFolderAndSelectItems(nint pidlFolder, uint cIdl, [In, MarshalAs(UnmanagedType.LPArray)] nint[] apidl, uint dwFlags);
 
@@ -115,7 +184,12 @@ public static class WinApi
     public static extern int SHGetNameFromIDList(nint pidl, uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string? ppszName);
 
     [DllImport("oleacc.dll")]
-    public static extern nint AccessibleObjectFromPoint(Point pt, [Out, MarshalAs(UnmanagedType.Interface)] out IAccessible accObj, [Out] out object ChildID);
+    public static extern nint AccessibleObjectFromPoint(Point pt, [Out, MarshalAs(UnmanagedType.Interface)] out IAccessible? accObj, [Out] out object? ChildID);
+
+    public static bool SendMessageSafe(nint hWnd, uint msg, nint wParam, nint lParam, uint timeoutMs = 500)
+    {
+        return SendMessageTimeout(hWnd, msg, wParam, lParam, SMTO_ABORTIFHUNG | SMTO_NORMAL, timeoutMs, out _) != 0;
+    }
 
     public static IEnumerable<nint> FindAllWindowsEx(string className, nint parent = 0, string? windowTitle = null)
     {
@@ -137,10 +211,12 @@ public static class WinApi
     /// <param name="window">The handle to the window that needs to be restored to the foreground.</param>
     public static void RestoreWindowToForeground(nint window)
     {
-        //If Minimized
+        if (window == 0 || !IsWindow(window)) return;
+
+        // If Minimized
         if (IsIconic(window))
         {
-            // Show the window but don't activate it, SetForegroundWindow is going to activate it. 
+            // Show the window but don't activate it, SetForegroundWindow is going to activate it.
             ShowWindow(window, SW_SHOWNOACTIVATE);
         }
 
@@ -155,29 +231,87 @@ public static class WinApi
     {
         if (hWnd == 0) return string.Empty;
 
-        var className = new StringBuilder(maxClassNameLength + 1);
-        RealGetWindowClass(hWnd, className, (uint)className.Capacity);
-
-        return className.ToString();
+        var buffer = GetClassNameBuffer(maxClassNameLength + 1);
+        var len = RealGetWindowClass(hWnd, buffer, (uint)(maxClassNameLength + 1));
+        return len == 0 ? string.Empty : buffer.ToString(0, (int)len);
     }
+
     public static bool IsWindowHasClassName(nint hWnd, string className, StringComparison comparison = StringComparison.OrdinalIgnoreCase)
     {
-        var currentClassName = GetWindowClassName(hWnd, className.Length);
+        if (hWnd == 0) return false;
 
-        return string.Equals(currentClassName, className, comparison);
+        // Request +2 capacity so a longer class name (e.g. "CabinetWClassEx") is never truncated to falsely match "CabinetWClass".
+        var requestCapacity = className.Length + 2;
+        var buffer = GetClassNameBuffer(requestCapacity);
+        var len = (int)RealGetWindowClass(hWnd, buffer, (uint)requestCapacity);
+        if (len != className.Length) return false;
+
+        if (comparison == StringComparison.OrdinalIgnoreCase)
+        {
+            for (var i = 0; i < len; i++)
+            {
+                var a = buffer[i];
+                var b = className[i];
+                if (a != b && char.ToUpperInvariant(a) != char.ToUpperInvariant(b))
+                    return false;
+            }
+            return true;
+        }
+
+        if (comparison == StringComparison.Ordinal)
+        {
+            for (var i = 0; i < len; i++)
+            {
+                if (buffer[i] != className[i])
+                    return false;
+            }
+            return true;
+        }
+
+        return string.Equals(buffer.ToString(0, len), className, comparison);
     }
-    
+
+    private static StringBuilder GetClassNameBuffer(int minCapacity)
+    {
+        var buffer = _classNameBuffer;
+        if (buffer == null)
+        {
+            buffer = new StringBuilder(Math.Max(256, minCapacity));
+            _classNameBuffer = buffer;
+        }
+        else
+        {
+            buffer.Clear();
+            if (buffer.Capacity < minCapacity)
+                buffer.EnsureCapacity(minCapacity);
+        }
+
+        return buffer;
+    }
+
     public static string? GetProcessPath(int pid)
     {
+        return GetProcessPathAndCreationTime(pid, out _);
+    }
+
+    public static string? GetProcessPathAndCreationTime(int pid, out long creationTime)
+    {
+        creationTime = long.MaxValue;
         const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
         var procHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, (uint)pid);
         if (procHandle == 0) return null;
-        
+
         try
         {
             var capacity = 260;
             var sb = new StringBuilder(capacity);
-            return QueryFullProcessImageName(procHandle, 0, sb, ref capacity) ? sb.ToString() : null;
+            if (!QueryFullProcessImageName(procHandle, 0, sb, ref capacity))
+                return null;
+
+            if (GetProcessTimes(procHandle, out var ct, out _, out _, out _))
+                creationTime = ct;
+
+            return sb.ToString();
         }
         finally
         {

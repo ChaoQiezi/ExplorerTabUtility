@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Threading;
 using System.Runtime.InteropServices;
 using ExplorerTabUtility.WinAPI;
 
@@ -6,8 +7,8 @@ namespace ExplorerTabUtility.Interop;
 
 public sealed class ShellPathComparer : IDisposable
 {
-    private IShellFolder _desktopFolder;
-    private bool _disposed;
+    private IShellFolder? _desktopFolder;
+    private int _disposed;
 
     public ShellPathComparer()
     {
@@ -29,33 +30,58 @@ public sealed class ShellPathComparer : IDisposable
     /// </summary>
     /// <param name="path">The file system path to convert.</param>
     /// <returns>A PIDL representing the file system path. It is the caller's responsibility to release it.</returns>
-    public nint GetPidlFromPath(string path)
+    public nint GetPidlFromPath(string? path)
     {
+        if (string.IsNullOrWhiteSpace(path) || Volatile.Read(ref _disposed) != 0)
+            return 0;
+
+        var folder = _desktopFolder;
+        if (folder == null)
+            return 0;
+
         uint pdwAttributes = 0;
-        _desktopFolder.ParseDisplayName(0, 0, path, out _, out var pidl, ref pdwAttributes);
+        var hr = folder.ParseDisplayName(0, 0, path!, out _, out var pidl, ref pdwAttributes);
+        if (hr != 0)
+        {
+            if (pidl != 0)
+                Marshal.FreeCoTaskMem(pidl);
+            return 0;
+        }
 
         return pidl;
     }
+
     public static string? GetPathFromPidl(nint pidl, uint sigdnName = WinApi.SIGDN_URL)
     {
+        if (pidl == 0) return null;
         var hr = WinApi.SHGetNameFromIDList(pidl, sigdnName, out var path);
         return hr == 0 ? path : null;
     }
+
     public bool CompareIds(nint pidl1, nint pidl2)
     {
-        return _desktopFolder.CompareIDs(0, pidl1, pidl2) == 0;
+        if (pidl1 == 0 || pidl2 == 0 || Volatile.Read(ref _disposed) != 0)
+            return false;
+
+        var folder = _desktopFolder;
+        return folder != null && folder.CompareIDs(0, pidl1, pidl2) == 0;
     }
-    public bool CompareWithShGetName(nint pidl1, nint pidl2)
+
+    public static bool CompareWithShGetName(nint pidl1, nint pidl2)
     {
+        if (pidl1 == 0 || pidl2 == 0) return false;
+
         var fsPath1 = GetPathFromPidl(pidl1);
         if (fsPath1 == null) return false;
 
         var fsPath2 = GetPathFromPidl(pidl2);
-
-        return StringComparer.OrdinalIgnoreCase.Equals(fsPath1, fsPath2);
+        return fsPath2 != null && StringComparer.OrdinalIgnoreCase.Equals(fsPath1, fsPath2);
     }
+
     public bool IsEquivalent(nint pidl1, nint pidl2)
     {
+        if (pidl1 == 0 || pidl2 == 0) return false;
+
         try
         {
             return CompareIds(pidl1, pidl2) || CompareWithShGetName(pidl1, pidl2);
@@ -65,14 +91,16 @@ public sealed class ShellPathComparer : IDisposable
             return false;
         }
     }
-    public bool IsEquivalent(nint pidl1, string path2)
+
+    public bool IsEquivalent(nint pidl1, string? path2)
     {
+        if (pidl1 == 0 || string.IsNullOrWhiteSpace(path2)) return false;
+
         nint pidl2 = 0;
         try
         {
             pidl2 = GetPidlFromPath(path2);
-
-            return IsEquivalent(pidl1, pidl2);
+            return pidl2 != 0 && IsEquivalent(pidl1, pidl2);
         }
         catch
         {
@@ -84,8 +112,12 @@ public sealed class ShellPathComparer : IDisposable
                 Marshal.FreeCoTaskMem(pidl2);
         }
     }
-    public bool IsEquivalent(string path1, string path2)
+
+    public bool IsEquivalent(string? path1, string? path2)
     {
+        if (string.IsNullOrWhiteSpace(path1) || string.IsNullOrWhiteSpace(path2))
+            return false;
+
         if (StringComparer.OrdinalIgnoreCase.Equals(path1, path2))
             return true;
 
@@ -94,9 +126,10 @@ public sealed class ShellPathComparer : IDisposable
         try
         {
             pidl1 = GetPidlFromPath(path1);
-            pidl2 = GetPidlFromPath(path2);
+            if (pidl1 == 0) return false;
 
-            return IsEquivalent(pidl1, pidl2);
+            pidl2 = GetPidlFromPath(path2);
+            return pidl2 != 0 && IsEquivalent(pidl1, pidl2);
         }
         catch
         {
@@ -111,10 +144,17 @@ public sealed class ShellPathComparer : IDisposable
                 Marshal.FreeCoTaskMem(pidl2);
         }
     }
-    public bool IsEquivalent(string targetPath, string comparePath, nint targetPidl)
+
+    public bool IsEquivalent(string? targetPath, string? comparePath, nint targetPidl)
     {
-        if (StringComparer.OrdinalIgnoreCase.Equals(targetPath, comparePath))
+        if (string.IsNullOrWhiteSpace(comparePath))
+            return false;
+
+        if (!string.IsNullOrWhiteSpace(targetPath) && StringComparer.OrdinalIgnoreCase.Equals(targetPath, comparePath))
             return true;
+
+        if (targetPidl == 0)
+            return false;
 
         nint comparePidl = 0;
         try
@@ -135,13 +175,23 @@ public sealed class ShellPathComparer : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
 
-        // release the RCW
-        Marshal.ReleaseComObject(_desktopFolder);
-        _desktopFolder = null!;
+        var folder = Interlocked.Exchange(ref _desktopFolder, null);
+        if (folder != null)
+        {
+            try
+            {
+                if (Marshal.IsComObject(folder))
+                    Marshal.ReleaseComObject(folder);
+            }
+            catch
+            {
+                // Ignore COM release errors during teardown
+            }
+        }
 
-        _disposed = true;
         GC.SuppressFinalize(this);
     }
 

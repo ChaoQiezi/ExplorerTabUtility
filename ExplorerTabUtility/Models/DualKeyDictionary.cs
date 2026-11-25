@@ -202,20 +202,25 @@ public class DualKeyDictionary<TPrimaryKey, TOptionalKey, TValue> :
     /// <summary>
     /// Updates the optional key of an existing entry identified by primaryKey.
     /// If the new optional key is null, the old one is removed.
+    /// If another entry holds the optional key (e.g. recycled HWND), that stale mapping is cleanly replaced.
     /// </summary>
-    /// <exception cref="ArgumentNullException">Thrown if primaryKey is null.</exception>
-    /// <exception cref="KeyNotFoundException">Thrown if the primaryKey does not exist.</exception>
-    /// <exception cref="ArgumentException">Thrown if the new optional key already exists.</exception>
-    public void UpdateOptionalKey(TPrimaryKey primaryKey, TOptionalKey? newOptionalKey)
+    public bool TryUpdateOptionalKey(TPrimaryKey primaryKey, TOptionalKey? newOptionalKey)
     {
-        if (!_primaryDict.TryGetValue(primaryKey, out var entry)) throw new ArgumentException(@"Primary key not found", nameof(primaryKey));
+        if (!_primaryDict.TryGetValue(primaryKey, out var entry))
+            return false;
 
         if (EqualityComparer<TOptionalKey?>.Default.Equals(newOptionalKey, entry.OptionalKey))
-            return;
+            return true;
 
-        // Check uniqueness of new optional key if not null
-        if (newOptionalKey is not null && _optionalDict.ContainsKey(newOptionalKey))
-            throw new ArgumentException(@"Optional key is already used by another primary key", nameof(newOptionalKey));
+        // If another primary key still holds this optional key (e.g. recycled HWND), unlink it cleanly
+        if (newOptionalKey is not null &&
+            _optionalDict.TryGetValue(newOptionalKey, out var conflictingPrimary) &&
+            !EqualityComparer<TPrimaryKey>.Default.Equals(conflictingPrimary, primaryKey))
+        {
+            if (_primaryDict.TryGetValue(conflictingPrimary, out var conflictingEntry))
+                conflictingEntry.OptionalKey = default;
+            _optionalDict.Remove(newOptionalKey);
+        }
 
         // Remove old optional key mapping if it existed
         if (entry.OptionalKey is not null)
@@ -227,6 +232,13 @@ public class DualKeyDictionary<TPrimaryKey, TOptionalKey, TValue> :
         // Add new optional key mapping if not null
         if (newOptionalKey is not null)
             _optionalDict[newOptionalKey] = primaryKey;
+
+        return true;
+    }
+
+    public void UpdateOptionalKey(TPrimaryKey primaryKey, TOptionalKey? newOptionalKey)
+    {
+        TryUpdateOptionalKey(primaryKey, newOptionalKey);
     }
 
     /// <summary>

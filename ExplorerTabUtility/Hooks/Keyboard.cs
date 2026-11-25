@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Linq;
 using System.Threading;
 using System.Collections.Generic;
 using H.Hooks;
@@ -10,53 +11,71 @@ namespace ExplorerTabUtility.Hooks;
 public sealed class Keyboard : IHook
 {
     private readonly LowLevelKeyboardHook _lowLevelKeyboardHook;
-    private readonly IReadOnlyCollection<HotKeyProfile> _hotkeyProfiles;
+    private volatile HotKeyProfile[] _profiles = [];
+    private int _disposed;
     public bool IsHookActive => _lowLevelKeyboardHook.IsStarted;
     public event Action<HotKeyEventArgs>? OnHotKeyProfileTriggered;
 
     public Keyboard(IReadOnlyCollection<HotKeyProfile> hotkeyProfiles)
     {
-        _hotkeyProfiles = hotkeyProfiles;
+        UpdateProfiles(hotkeyProfiles);
         _lowLevelKeyboardHook = new LowLevelKeyboardHook { Handling = true };
         _lowLevelKeyboardHook.Down += LowLevelKeyboardHook_Down;
     }
 
-    public void StartHook() => _lowLevelKeyboardHook.Start();
-    public void StopHook() => _lowLevelKeyboardHook.Stop();
+    public void UpdateProfiles(IEnumerable<HotKeyProfile> hotkeyProfiles)
+    {
+        // Pre-filter into a compact immutable array for lock-free, zero-allocation hook dispatch
+        _profiles = hotkeyProfiles
+            .Where(p => p.IsEnabled && !p.IsMouse && p.HotKeys is { Length: > 0 })
+            .ToArray();
+    }
+
+    public void StartHook()
+    {
+        if (Volatile.Read(ref _disposed) == 0)
+            _lowLevelKeyboardHook.Start();
+    }
+
+    public void StopHook()
+    {
+        if (Volatile.Read(ref _disposed) == 0)
+            _lowLevelKeyboardHook.Stop();
+    }
 
     private void LowLevelKeyboardHook_Down(object? sender, KeyboardEventArgs e)
     {
         var handler = OnHotKeyProfileTriggered;
         if (handler == null) return;
 
+        var profiles = _profiles;
+        if (profiles.Length == 0) return;
+
         bool? isFileExplorerForeground = null;
         nint handle = 0;
-        foreach (var profile in _hotkeyProfiles)
+        for (var i = 0; i < profiles.Length; i++)
         {
-            // Skip disabled, empty or mouse
-            if (!profile.IsEnabled || profile.IsMouse || profile.HotKeys is null || profile.HotKeys.Length == 0)
-                continue;
+            var profile = profiles[i];
 
             // Skip if keys do not match
-            if (!e.Keys.Are(profile.HotKeys)) continue;
+            if (!e.Keys.Are(profile.HotKeys!)) continue;
 
-            // Let's see if we need to check File Explorer
+            // Check File Explorer scope only when needed (cached for this key event)
             if (profile.Scope == HotkeyScope.FileExplorer)
             {
-                // Check if File Explorer is foreground (only once)
                 isFileExplorerForeground ??= Helper.IsFileExplorerForeground(out handle);
 
                 if (isFileExplorerForeground == false)
                 {
-                    handle = 0; // Reset handle if not File Explorer
+                    handle = 0;
                     continue;
                 }
             }
 
-            // Set handled value.
+            // Set handled value
             e.IsHandled = profile.IsHandled;
-            
-            // Queue the hotkey trigger in a separate thread.
+
+            // Queue the hotkey trigger in a separate thread
 #if NET7_0_OR_GREATER
             ThreadPool.QueueUserWorkItem(static s => s.Handler.Invoke(new HotKeyEventArgs(s.Profile, s.Handle)),
                 new State(handler, profile, handle), false);
@@ -72,7 +91,11 @@ public sealed class Keyboard : IHook
 
     public void Dispose()
     {
-        StopHook();
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+
+        _lowLevelKeyboardHook.Down -= LowLevelKeyboardHook_Down;
+        _lowLevelKeyboardHook.Stop();
         _lowLevelKeyboardHook.Dispose();
     }
 

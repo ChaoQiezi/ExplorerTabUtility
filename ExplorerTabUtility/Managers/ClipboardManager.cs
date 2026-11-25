@@ -27,7 +27,7 @@ public static class ClipboardManager
     [DllImport("kernel32.dll")]
     private static extern nint GlobalLock(nint hMem);
     [DllImport("kernel32.dll")]
-    private static extern uint GlobalSize(nint hMem);
+    private static extern nuint GlobalSize(nint hMem);
     [DllImport("kernel32.dll")]
     private static extern bool GlobalUnlock(nint hMem);
     [DllImport("kernel32.dll")]
@@ -47,9 +47,11 @@ public static class ClipboardManager
 
     public static string GetClipboardText()
     {
+        var opened = false;
         try
         {
-            if (!OpenClipboard(default))
+            opened = OpenClipboard(default);
+            if (!opened)
                 return string.Empty;
 
             var handle = GetClipboardData(CF_UNICODETEXT);
@@ -60,18 +62,20 @@ public static class ClipboardManager
             if (lockedData == default)
                 return string.Empty;
 
-            var size = GlobalSize(handle);
-            if (size == 0)
+            try
+            {
+                var size = GlobalSize(handle);
+                if (size == 0 || size > int.MaxValue)
+                    return string.Empty;
+
+                var buffer = new byte[(int)size];
+                Marshal.Copy(lockedData, buffer, 0, buffer.Length);
+                return Encoding.Unicode.GetString(buffer).TrimEnd('\0');
+            }
+            finally
             {
                 GlobalUnlock(handle);
-                return string.Empty;
             }
-
-            var buffer = new byte[size];
-            Marshal.Copy(lockedData, buffer, 0, (int)size);
-            GlobalUnlock(handle);
-
-            return Encoding.Unicode.GetString(buffer).TrimEnd('\0');
         }
         catch (Exception e)
         {
@@ -80,22 +84,25 @@ public static class ClipboardManager
         }
         finally
         {
-            CloseClipboard();
+            if (opened)
+                CloseClipboard();
         }
     }
 
     public static void SetClipboardText(string text)
     {
+        var opened = false;
         try
         {
-            if (!OpenClipboard(default))
+            opened = OpenClipboard(default);
+            if (!opened)
                 return;
 
             EmptyClipboard();
 
             text = $"{text.TrimEnd('\0')}\0";
             var buffer = Encoding.Unicode.GetBytes(text);
-            var size = (uint)buffer.Length;
+            var size = (nuint)buffer.Length;
 
             var handle = GlobalAlloc(GHND, size);
             if (handle == default)
@@ -108,9 +115,12 @@ public static class ClipboardManager
                 return;
             }
 
-            Marshal.Copy(buffer, 0, pointer, (int)size);
-            SetClipboardData(CF_UNICODETEXT, handle);
+            Marshal.Copy(buffer, 0, pointer, buffer.Length);
+            // Must unlock BEFORE transferring ownership to SetClipboardData
             GlobalUnlock(handle);
+
+            if (SetClipboardData(CF_UNICODETEXT, handle) == default)
+                GlobalFree(handle);
         }
         catch (Exception e)
         {
@@ -118,7 +128,8 @@ public static class ClipboardManager
         }
         finally
         {
-            CloseClipboard();
+            if (opened)
+                CloseClipboard();
         }
     }
 
@@ -126,9 +137,11 @@ public static class ClipboardManager
     public static Dictionary<uint, byte[]> GetClipboardData()
     {
         var data = new Dictionary<uint, byte[]>();
+        var opened = false;
         try
         {
-            if (!OpenClipboard(default))
+            opened = OpenClipboard(default);
+            if (!opened)
                 return data;
 
             uint format = 0;
@@ -144,17 +157,20 @@ public static class ClipboardManager
                 if (lockedData == default)
                     continue;
 
-                var size = GlobalSize(handle);
-                if (size == 0)
+                try
+                {
+                    var size = GlobalSize(handle);
+                    if (size == 0 || size > int.MaxValue)
+                        continue;
+
+                    var buffer = new byte[(int)size];
+                    Marshal.Copy(lockedData, buffer, 0, buffer.Length);
+                    data[format] = buffer;
+                }
+                finally
                 {
                     GlobalUnlock(handle);
-                    continue;
                 }
-
-                var buffer = new byte[size];
-                Marshal.Copy(lockedData, buffer, 0, (int)size);
-                data.Add(format, buffer);
-                GlobalUnlock(handle);
             }
         }
         catch (Exception e)
@@ -163,7 +179,8 @@ public static class ClipboardManager
         }
         finally
         {
-            CloseClipboard();
+            if (opened)
+                CloseClipboard();
         }
         return data;
     }
@@ -172,10 +189,12 @@ public static class ClipboardManager
     public static void SetClipboardData(Dictionary<uint, byte[]> data)
     {
         if (data.Count == 0) return;
-        
+
+        var opened = false;
         try
         {
-            if (!OpenClipboard(default))
+            opened = OpenClipboard(default);
+            if (!opened)
                 return;
 
             EmptyClipboard();
@@ -196,8 +215,10 @@ public static class ClipboardManager
                 }
 
                 Marshal.Copy(buffer, 0, pointer, buffer.Length);
-                SetClipboardData(format, handle);
                 GlobalUnlock(handle);
+
+                if (SetClipboardData(format, handle) == default)
+                    GlobalFree(handle);
             }
         }
         catch (Exception e)
@@ -206,16 +227,19 @@ public static class ClipboardManager
         }
         finally
         {
-            CloseClipboard();
+            if (opened)
+                CloseClipboard();
         }
     }
 
     // Clear the clipboard
     public static void ClearClipboard()
     {
+        var opened = false;
         try
         {
-            if (!OpenClipboard(default)) return;
+            opened = OpenClipboard(default);
+            if (!opened) return;
 
             EmptyClipboard();
         }
@@ -225,7 +249,8 @@ public static class ClipboardManager
         }
         finally
         {
-            CloseClipboard();
+            if (opened)
+                CloseClipboard();
         }
     }
 }

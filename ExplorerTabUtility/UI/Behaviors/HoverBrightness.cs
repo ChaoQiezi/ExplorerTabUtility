@@ -128,7 +128,11 @@ public static class HoverBrightness
             var opacity = GetBrightnessFactor(adornedElement);
             var brush = GetOverlayBrush(adornedElement);
             if (brush == Brushes.Transparent)
-                brush = new SolidColorBrush(color);
+            {
+                var solid = new SolidColorBrush(color);
+                solid.Freeze();
+                brush = solid;
+            }
 
             // Get target element if specified, otherwise find border in template
             _target = GetTarget(adornedElement);

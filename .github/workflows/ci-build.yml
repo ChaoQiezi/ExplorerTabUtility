@@ -1,0 +1,58 @@
+name: CI Build
+
+on:
+  push:
+    branches: [ 'master', 'main' ]
+  workflow_dispatch:
+
+env:
+  PROJECT_NAME: ExplorerTabUtility
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        framework: [ 'net9.0-windows', 'net481' ]
+        arch: [ 'x64' ]
+      fail-fast: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Build and Publish
+        run: |
+          $outputDir = "../publish/${{ matrix.framework }}/${{ matrix.arch }}"
+          msbuild "${{ env.PROJECT_NAME }}/${{ env.PROJECT_NAME }}.csproj" /restore /t:Publish /p:Configuration=Release /p:TargetFramework=${{ matrix.framework }} /p:RuntimeIdentifier=win-${{ matrix.arch }} /p:PublishDir=$outputDir /p:DebugType=none
+        shell: pwsh
+
+      - name: Package Zip Artifact
+        id: package
+        run: |
+          $frameworkName = if ("${{ matrix.framework }}" -eq "net9.0-windows") { "Net9.0_FrameworkDependent" } else { "NetFW4.8.1" }
+          $shortSha = "${{ github.sha }}".Substring(0, 7)
+          $zipName = "${{ env.PROJECT_NAME }}_${shortSha}_${{ matrix.arch }}_${frameworkName}.zip"
+
+          $tempDir = "temp-$(New-Guid)"
+          New-Item -Path "$tempDir/${{ env.PROJECT_NAME }}" -ItemType Directory -Force | Out-Null
+          Copy-Item -Path "publish/${{ matrix.framework }}/${{ matrix.arch }}/*" -Destination "$tempDir/${{ env.PROJECT_NAME }}" -Recurse
+          Compress-Archive -Path "$tempDir/*" -DestinationPath $zipName
+          Remove-Item -Path $tempDir -Recurse -Force
+
+          echo "zipName=$zipName" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.zipName }}
+          path: ${{ steps.package.outputs.zipName }}
+          retention-days: 30
