@@ -653,7 +653,7 @@ public class ExplorerWatcher : IHook
         return null;
     }
 
-    private void OnShellWindowRegistered(int _)
+    private void OnShellWindowRegistered(int lCookie)
     {
         // Immediately offload off the COM event callback so explorer.exe is NEVER blocked
         ThreadPool.QueueUserWorkItem(static state =>
@@ -777,7 +777,7 @@ public class ExplorerWatcher : IHook
             if (showAgain && hWnd != 0 && Helper.HiddenWindows.ContainsKey(hWnd))
             {
                 Helper.ShowWindow(hWnd, removeCache: false);
-                _ = Task.Delay(2_000).ContinueWith(_ => Helper.HiddenWindows.TryRemove(hWnd, out _), TaskScheduler.Default);
+                _ = Task.Delay(2_000).ContinueWith(t => Helper.HiddenWindows.TryRemove(hWnd, out _), TaskScheduler.Default);
             }
         }
     }
